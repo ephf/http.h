@@ -39,6 +39,7 @@ enum {
 	HttpErrNoDefinedMultithreading,
 	HttpErrMissingRequestHandler,
 	HttpErrRead,
+	HttpErrOverlappingOptions,
 	HTTP__ERRNO_COUNT,
 };
 
@@ -176,6 +177,7 @@ const char* http__errlist[HTTP__ERRNO_COUNT] = {
 		"(eg. -DHTTP_PTHREAD for pthread)",
 	[HttpErrMissingRequestHandler] = "expected on_request to be set",
 	[HttpErrRead] = "read() failed",
+	[HttpErrOverlappingOptions] = "two or more input options overlap",
 };
 
 char http__strerror_buffer[] =
@@ -331,6 +333,11 @@ HTTPDEF int http_serve(unsigned short port,
 	server->on_error = opts.on_error ?: &http__default_on_error;
 
 	if(opts.thread_count) {
+		if(opts.fork_on_request) {
+			(void) HTTP_REALLOC(server, 0);
+			return http_errno = HttpErrOverlappingOptions;
+		}
+
 		if(!server->on_request) {
 			(void) HTTP_REALLOC(server, 0);
 			if(opts.on_error) opts.on_error(HttpErrMissingRequestHandler);
@@ -381,7 +388,10 @@ char http__request_buffer[65536];
 HTTPDEF void http__wrap_on_request(Server* server) {
 #if defined(__unix__) || defined(__MACH__)
 	int filedes;
-outer_continue: while((filedes = accept(server->_socket, 0, 0)) > 0) {
+outer_continue:
+	while((filedes = accept(server->_socket, 0, 0)) > 0) {
+		if(server->fork_on_request && fork()) continue;
+
 		Request req = { ._filedes = filedes };
 		Response res = { ._filedes = filedes };
 
@@ -455,6 +465,8 @@ outer_continue: while((filedes = accept(server->_socket, 0, 0)) > 0) {
 		req.body = tok;
 		server->on_request(req, res);
 		freereq(req);
+
+		if(server->fork_on_request) return;
 	}
 }
 
